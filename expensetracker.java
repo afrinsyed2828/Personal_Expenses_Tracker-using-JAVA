@@ -10,8 +10,20 @@ import java.util.Arrays;
 import java.util.Comparator;
 import java.util.LinkedHashMap;
 import java.util.Map;
+import java.sql.Connection;
+import java.sql.DriverManager;
+import java.sql.PreparedStatement;
+import java.sql.ResultSet;
+import java.sql.SQLException;
+import java.sql.Statement;
 
 public class ExpenseTracker extends JFrame {
+
+    // Update PASSWORD with your MySQL root password.
+    private static final String DB_URL =
+        "jdbc:mysql://localhost:3306/expensedb?serverTimezone=Asia/Kolkata";
+    private static final String DB_USER = "root";
+    private static final String DB_PASSWORD = "Afrinsyed@630";
 
     Color blue = new Color(45, 105, 220);
     Color background = new Color(240, 244, 250);
@@ -46,6 +58,21 @@ public class ExpenseTracker extends JFrame {
 
     public ExpenseTracker() {
 
+        // Prepare the database and load saved information before showing the UI.
+        try {
+            initializeDatabase();
+            loadDataFromDatabase();
+        } catch (SQLException ex) {
+            JOptionPane.showMessageDialog(this,
+                "Could not connect to MySQL. Check that MySQL Server is running, "
+                + "the database exists, and DB_PASSWORD is correct.\n"
+                + ex.getMessage(),
+                "Database Error", JOptionPane.ERROR_MESSAGE);
+            ex.printStackTrace();
+            System.exit(1);
+            return;
+        }
+
         setTitle("Personal Expense Tracker");
         setSize(1000, 650);
         setDefaultCloseOperation(JFrame.EXIT_ON_CLOSE);
@@ -69,18 +96,166 @@ public class ExpenseTracker extends JFrame {
     // EXPENSE MODEL
 
     class Expense {
+        int id;
         String description;
         String category;
         double amount;
         LocalDate date;
 
-        Expense(String description, String category,
+        Expense(int id, String description, String category,
                 double amount, LocalDate date) {
-
+            this.id = id;
             this.description = description;
             this.category = category;
             this.amount = amount;
             this.date = date;
+        }
+    }
+
+    // MYSQL DATABASE METHODS
+
+    Connection getConnection() throws SQLException {
+        return DriverManager.getConnection(DB_URL, DB_USER, DB_PASSWORD);
+    }
+
+    void initializeDatabase() throws SQLException {
+        try (Connection con = getConnection();
+             Statement st = con.createStatement()) {
+
+            st.executeUpdate(
+                "CREATE TABLE IF NOT EXISTS categories (" +
+                "category_name VARCHAR(100) PRIMARY KEY)"
+            );
+
+            st.executeUpdate(
+                "CREATE TABLE IF NOT EXISTS expenses (" +
+                "id INT AUTO_INCREMENT PRIMARY KEY, " +
+                "description VARCHAR(255) NOT NULL, " +
+                "category VARCHAR(100) NOT NULL, " +
+                "amount DOUBLE NOT NULL, " +
+                "expense_date DATE NOT NULL)"
+            );
+
+            st.executeUpdate(
+                "CREATE TABLE IF NOT EXISTS app_settings (" +
+                "setting_key VARCHAR(50) PRIMARY KEY, " +
+                "setting_value VARCHAR(100) NOT NULL)"
+            );
+
+            try (ResultSet rs = st.executeQuery(
+                    "SELECT COUNT(*) FROM categories")) {
+                rs.next();
+                if (rs.getInt(1) == 0) {
+                    try (PreparedStatement ps = con.prepareStatement(
+                            "INSERT INTO categories(category_name) VALUES (?)")) {
+                        for (String category :
+                                Arrays.asList("Food", "Travel", "Shopping", "Education")) {
+                            ps.setString(1, category);
+                            ps.executeUpdate();
+                        }
+                    }
+                }
+            }
+
+            st.executeUpdate(
+                "INSERT IGNORE INTO app_settings(setting_key, setting_value) " +
+                "VALUES ('monthly_budget', '10000')"
+            );
+        }
+    }
+
+    void loadDataFromDatabase() throws SQLException {
+        categories.clear();
+        expenses.clear();
+
+        try (Connection con = getConnection()) {
+            try (PreparedStatement ps = con.prepareStatement(
+                    "SELECT category_name FROM categories ORDER BY category_name");
+                 ResultSet rs = ps.executeQuery()) {
+                while (rs.next()) {
+                    categories.add(rs.getString("category_name"));
+                }
+            }
+
+            try (PreparedStatement ps = con.prepareStatement(
+                    "SELECT id, description, category, amount, expense_date " +
+                    "FROM expenses ORDER BY expense_date DESC, id DESC");
+                 ResultSet rs = ps.executeQuery()) {
+                while (rs.next()) {
+                    expenses.add(new Expense(
+                        rs.getInt("id"),
+                        rs.getString("description"),
+                        rs.getString("category"),
+                        rs.getDouble("amount"),
+                        rs.getDate("expense_date").toLocalDate()
+                    ));
+                }
+            }
+
+            try (PreparedStatement ps = con.prepareStatement(
+                    "SELECT setting_value FROM app_settings " +
+                    "WHERE setting_key = 'monthly_budget'");
+                 ResultSet rs = ps.executeQuery()) {
+                if (rs.next()) {
+                    budget = Double.parseDouble(rs.getString(1));
+                }
+            }
+        }
+        budgetField.setText(String.valueOf(budget));
+    }
+
+    int insertExpense(String description, String category,
+                      double amount, LocalDate date) throws SQLException {
+        String sql = "INSERT INTO expenses " +
+            "(description, category, amount, expense_date) VALUES (?, ?, ?, ?)";
+
+        try (Connection con = getConnection();
+             PreparedStatement ps = con.prepareStatement(
+                 sql, Statement.RETURN_GENERATED_KEYS)) {
+            ps.setString(1, description);
+            ps.setString(2, category);
+            ps.setDouble(3, amount);
+            ps.setDate(4, java.sql.Date.valueOf(date));
+            ps.executeUpdate();
+
+            try (ResultSet keys = ps.getGeneratedKeys()) {
+                if (keys.next()) return keys.getInt(1);
+            }
+        }
+        throw new SQLException("MySQL did not return the new expense ID.");
+    }
+
+    void updateExpenseInDatabase(Expense expense) throws SQLException {
+        String sql = "UPDATE expenses SET description=?, category=?, " +
+            "amount=?, expense_date=? WHERE id=?";
+        try (Connection con = getConnection();
+             PreparedStatement ps = con.prepareStatement(sql)) {
+            ps.setString(1, expense.description);
+            ps.setString(2, expense.category);
+            ps.setDouble(3, expense.amount);
+            ps.setDate(4, java.sql.Date.valueOf(expense.date));
+            ps.setInt(5, expense.id);
+            ps.executeUpdate();
+        }
+    }
+
+    void deleteExpenseFromDatabase(int id) throws SQLException {
+        try (Connection con = getConnection();
+             PreparedStatement ps = con.prepareStatement(
+                 "DELETE FROM expenses WHERE id=?")) {
+            ps.setInt(1, id);
+            ps.executeUpdate();
+        }
+    }
+
+    void saveBudgetToDatabase(double newBudget) throws SQLException {
+        String sql = "INSERT INTO app_settings(setting_key, setting_value) " +
+            "VALUES ('monthly_budget', ?) " +
+            "ON DUPLICATE KEY UPDATE setting_value=VALUES(setting_value)";
+        try (Connection con = getConnection();
+             PreparedStatement ps = con.prepareStatement(sql)) {
+            ps.setString(1, String.valueOf(newBudget));
+            ps.executeUpdate();
         }
     }
 
@@ -220,8 +395,11 @@ public class ExpenseTracker extends JFrame {
                 return;
             }
 
-            expenses.add(new Expense(
+            int newId = insertExpense(
                 description, category, amount, LocalDate.now()
+            );
+            expenses.add(new Expense(
+                newId, description, category, amount, LocalDate.now()
             ));
 
             descriptionField.setText("");
@@ -235,6 +413,8 @@ public class ExpenseTracker extends JFrame {
         } catch (NumberFormatException ex) {
             JOptionPane.showMessageDialog(this,
                 "Please enter a valid amount.");
+        } catch (SQLException ex) {
+            showDatabaseError(ex);
         }
     }
 
@@ -248,6 +428,7 @@ public class ExpenseTracker extends JFrame {
             return;
         }
 
+        row = expenseTable.convertRowIndexToModel(row);
         Expense expense = expenses.get(row);
 
         String description = JOptionPane.showInputDialog(
@@ -294,6 +475,11 @@ public class ExpenseTracker extends JFrame {
 
             if (category == null) return;
 
+            Expense updated = new Expense(
+                expense.id, description, category, amount, expense.date
+            );
+            updateExpenseInDatabase(updated);
+
             expense.description = description;
             expense.amount = amount;
             expense.category = category;
@@ -303,6 +489,8 @@ public class ExpenseTracker extends JFrame {
         } catch (NumberFormatException ex) {
             JOptionPane.showMessageDialog(this,
                 "Please enter a valid amount.");
+        } catch (SQLException ex) {
+            showDatabaseError(ex);
         }
     }
 
@@ -316,6 +504,9 @@ public class ExpenseTracker extends JFrame {
             return;
         }
 
+        row = expenseTable.convertRowIndexToModel(row);
+        Expense selectedExpense = expenses.get(row);
+
         int confirm = JOptionPane.showConfirmDialog(
             this,
             "Are you sure you want to delete this expense?",
@@ -324,8 +515,13 @@ public class ExpenseTracker extends JFrame {
         );
 
         if (confirm == JOptionPane.YES_OPTION) {
-            expenses.remove(row);
-            refreshAll();
+            try {
+                deleteExpenseFromDatabase(selectedExpense.id);
+                expenses.remove(row);
+                refreshAll();
+            } catch (SQLException ex) {
+                showDatabaseError(ex);
+            }
         }
     }
 
@@ -379,11 +575,19 @@ public class ExpenseTracker extends JFrame {
         }
 
         if (!name.isEmpty() && !exists) {
-            categories.add(name);
-            refreshAll();
+            try (Connection con = getConnection();
+                 PreparedStatement ps = con.prepareStatement(
+                     "INSERT INTO categories(category_name) VALUES (?)")) {
+                ps.setString(1, name);
+                ps.executeUpdate();
+                categories.add(name);
+                refreshAll();
 
-            JOptionPane.showMessageDialog(this,
-                "Category added successfully!");
+                JOptionPane.showMessageDialog(this,
+                    "Category added successfully!");
+            } catch (SQLException ex) {
+                showDatabaseError(ex);
+            }
         } else {
             JOptionPane.showMessageDialog(this,
                 "Enter a valid, unique category.");
@@ -408,8 +612,16 @@ public class ExpenseTracker extends JFrame {
             }
         }
 
-        categories.remove(selected);
-        refreshAll();
+        try (Connection con = getConnection();
+             PreparedStatement ps = con.prepareStatement(
+                 "DELETE FROM categories WHERE category_name=?")) {
+            ps.setString(1, selected);
+            ps.executeUpdate();
+            categories.remove(selected);
+            refreshAll();
+        } catch (SQLException ex) {
+            showDatabaseError(ex);
+        }
     }
 
     // REPORTS PANEL
@@ -457,6 +669,7 @@ public class ExpenseTracker extends JFrame {
                 return;
             }
 
+            saveBudgetToDatabase(newBudget);
             budget = newBudget;
             refreshAll();
 
@@ -466,6 +679,8 @@ public class ExpenseTracker extends JFrame {
         } catch (NumberFormatException ex) {
             JOptionPane.showMessageDialog(this,
                 "Enter a valid budget.");
+        } catch (SQLException ex) {
+            showDatabaseError(ex);
         }
     }
 
@@ -482,6 +697,13 @@ public class ExpenseTracker extends JFrame {
         }
 
         refreshAll();
+    }
+
+    void showDatabaseError(SQLException ex) {
+        JOptionPane.showMessageDialog(this,
+            "Database operation failed:\n" + ex.getMessage(),
+            "MySQL Error", JOptionPane.ERROR_MESSAGE);
+        ex.printStackTrace();
     }
 
     // REFRESH ALL DATA
@@ -570,46 +792,22 @@ public class ExpenseTracker extends JFrame {
     }
 
     void refreshReport() {
+        double total = 0, monthly = 0;
+        StringBuilder report = new StringBuilder("PERSONAL EXPENSE REPORT\n============================\n\n");
 
-        if (reportArea == null) return;
-
-        StringBuilder report = new StringBuilder();
-
-        report.append("PERSONAL EXPENSE REPORT\n");
-        report.append("============================\n\n");
-
-        double total = 0;
-        double monthly = 0;
-
-        for (Expense expense : expenses) {
-
-            total += expense.amount;
-
-            if (YearMonth.from(expense.date).equals(YearMonth.now())) {
-                monthly += expense.amount;
-            }
+        for (Expense e : expenses) {
+            total += e.amount;
+            if (YearMonth.from(e.date).equals(YearMonth.now())) monthly += e.amount;
         }
 
-        report.append(String.format("Total Expenses : Rs. %.2f\n", total));
-        report.append(String.format("This Month     : Rs. %.2f\n", monthly));
-        report.append(String.format("Monthly Budget : Rs. %.2f\n", budget));
         report.append(String.format(
-            "Remaining      : Rs. %.2f\n\n", budget - monthly
-        ));
+            "Total Expenses : Rs. %.2f\nThis Month : Rs. %.2f\nMonthly Budget : Rs. %.2f\nRemaining : Rs. %.2f\n\n",
+            total, monthly, budget, budget - monthly));
+        report.append("EXPENSE DETAILS\n----------------------------\n");
 
-        report.append("EXPENSE DETAILS\n");
-        report.append("----------------------------\n");
-
-        for (Expense expense : expenses) {
-
-            report.append(String.format(
-                "%-18s %-12s Rs. %.2f  %s\n",
-                expense.description,
-                expense.category,
-                expense.amount,
-                expense.date
-            ));
-        }
+        for (Expense e : expenses)
+            report.append(String.format("%s | %s | Rs. %.2f | %s\n",
+                e.description, e.category, e.amount, e.date));
 
         reportArea.setText(report.toString());
     }
@@ -617,15 +815,8 @@ public class ExpenseTracker extends JFrame {
     // CATEGORY PIE CHART
 
     class PieChart extends JPanel {
-
-        Color[] colors = {
-            new Color(45, 105, 220),
-            new Color(40, 170, 120),
-            new Color(245, 160, 50),
-            new Color(180, 90, 200),
-            new Color(230, 90, 100),
-            new Color(80, 160, 190)
-        };
+        Color[] colors = {Color.BLUE, Color.GREEN, Color.ORANGE,
+                          Color.MAGENTA, Color.RED, Color.CYAN};
 
         PieChart() {
             setBackground(Color.WHITE);
@@ -633,69 +824,29 @@ public class ExpenseTracker extends JFrame {
         }
 
         protected void paintComponent(Graphics g) {
-
             super.paintComponent(g);
-
-            Graphics2D g2 = (Graphics2D) g;
-            g2.setRenderingHint(
-                RenderingHints.KEY_ANTIALIASING,
-                RenderingHints.VALUE_ANTIALIAS_ON
-            );
-
             Map<String, Double> data = new LinkedHashMap<>();
 
-            for (Expense expense : expenses) {
-                double value = data.containsKey(expense.category)
-                    ? data.get(expense.category) : 0;
+            for (Expense e : expenses)
+                data.put(e.category, data.getOrDefault(e.category, 0.0) + e.amount);
 
-                data.put(expense.category, value + expense.amount);
-            }
-
-            double total = 0;
-
-            for (double value : data.values()) {
-                total += value;
-            }
-
-            int x = 40;
-            int y = 40;
-            int size = 230;
-
+            double total = data.values().stream().mapToDouble(Double::doubleValue).sum();
             if (total == 0) {
-                g2.setFont(new Font("Arial", Font.BOLD, 18));
-                g2.drawString("No expenses available", x + 20, y + 120);
+                g.drawString("No expenses available", 60, 140);
                 return;
             }
 
-            double startAngle = 0;
-            int index = 0;
-
-            for (Map.Entry<String, Double> entry : data.entrySet()) {
-
-                double angle = entry.getValue() / total * 360;
-
-                g2.setColor(colors[index % colors.length]);
-
-                g2.fill(new Arc2D.Double(
-                    x, y, size, size,
-                    startAngle, angle, Arc2D.PIE
-                ));
-
-                int legendY = 55 + index * 30;
-
-                g2.fillRect(330, legendY, 15, 15);
-
-                g2.setColor(Color.BLACK);
-                g2.setFont(new Font("Arial", Font.PLAIN, 13));
-
-                g2.drawString(
-                    entry.getKey() + " - Rs. " +
-                    String.format("%.2f", entry.getValue()),
-                    355, legendY + 13
-                );
-
-                startAngle += angle;
-                index++;
+            int angle = 0, i = 0;
+            for (Map.Entry<String, Double> e : data.entrySet()) {
+                int part = (int) (e.getValue() / total * 360);
+                g.setColor(colors[i % colors.length]);
+                g.fillArc(40, 40, 230, 230, angle, part);
+                g.fillRect(300, 50 + i * 30, 15, 15);
+                g.setColor(Color.BLACK);
+                g.drawString(e.getKey() + " - Rs. " + String.format("%.2f", e.getValue()),
+                             325, 63 + i * 30);
+                angle += part;
+                i++;
             }
         }
     }
